@@ -86,10 +86,21 @@ public class ChatServer {
         }
     }
     
+    // 检查用户名是否已存在
+    public static boolean isUsernameExists(String username) {
+        return connectedUsers.values().stream()
+            .anyMatch(user -> user.getUsername().equals(username));
+    }
+    
+    // 检查用户是否存在
+    public static boolean isUserExists(String userId) {
+        return connectedUsers.containsKey(userId);
+    }
+    
     // 添加用户到聊天室
     public static void addUser(ChatUser user) {
         connectedUsers.put(user.getUserId(), user);
-        System.out.println("用户 " + user.getUsername() + " 加入聊天室");
+        System.out.println("用户 " + user.getUsername() + " 加入聊天室，当前在线用户数：" + connectedUsers.size());
         
         // 广播用户加入消息
         ChatMessage joinMessage = new ChatMessage();
@@ -104,7 +115,7 @@ public class ChatServer {
     public static void removeUser(String userId) {
         ChatUser user = connectedUsers.remove(userId);
         if (user != null) {
-            System.out.println("用户 " + user.getUsername() + " 离开聊天室");
+            System.out.println("用户 " + user.getUsername() + " 离开聊天室，当前在线用户数：" + connectedUsers.size());
             
             // 广播用户离开消息
             ChatMessage leaveMessage = new ChatMessage();
@@ -125,22 +136,9 @@ public class ChatServer {
             messageHistory.remove(0);
         }
         
-        String messageJson;
-        try {
-            messageJson = objectMapper.writeValueAsString(message);
-        } catch (Exception e) {
-            System.err.println("消息序列化失败：" + e.getMessage());
-            return;
-        }
-        
-        // 向所有连接的用户发送消息
-        connectedUsers.values().forEach(user -> {
-            try {
-                user.sendMessage(messageJson);
-            } catch (Exception e) {
-                System.err.println("向用户 " + user.getUsername() + " 发送消息失败：" + e.getMessage());
-            }
-        });
+        System.out.println("广播消息：[" + message.getType() + "] " + 
+                          (message.getUsername() != null ? message.getUsername() + ": " : "") + 
+                          message.getContent());
     }
     
     // 获取在线用户列表
