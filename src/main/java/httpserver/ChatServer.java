@@ -2,6 +2,8 @@ package httpserver;
 
 import httpserver.model.ChatMessage;
 import httpserver.model.ChatUser;
+import httpserver.pool.PoolManager;
+import httpserver.pool.PooledStringBuilder;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
 import java.io.IOException;
@@ -28,6 +30,8 @@ public class ChatServer {
     private static final List<ChatMessage> messageHistory = new CopyOnWriteArrayList<>();
     // JSON处理器
     private static final ObjectMapper objectMapper = new ObjectMapper();
+    // 内存池管理器
+    private static final PoolManager poolManager = PoolManager.getInstance();
     
     public static void startChatServer() {
         int nThreads = Runtime.getRuntime().availableProcessors();
@@ -36,11 +40,27 @@ public class ChatServer {
             new LinkedBlockingQueue<>(100), new ThreadPoolExecutor.DiscardPolicy()
         );
 
+        // 添加JVM关闭钩子，优雅关闭内存池
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            System.out.println("正在关闭聊天服务器...");
+            poolManager.printPoolStats();
+            poolManager.shutdown();
+            if (taskExecutor != null) {
+                taskExecutor.shutdown();
+            }
+            System.out.println("聊天服务器已关闭");
+        }));
+
         while (true) {
             try {
                 ServerSocket serverSocket = new ServerSocket(PORT);
-                System.out.println("聊天室服务器启动成功，监听端口：" + PORT);
-                System.out.println("请在浏览器中访问：http://localhost:" + PORT);
+                System.out.println("🚀 聊天室服务器启动成功，监听端口：" + PORT);
+                System.out.println("💡 采用内存池技术，性能更优");
+                System.out.println("🌐 请在浏览器中访问：http://localhost:" + PORT);
+                
+                // 打印初始内存池状态
+                poolManager.printPoolStats();
+                
                 bootstrapExecutor.submit(new ServerThread(serverSocket));
                 break;
             } catch (IOException e) {
@@ -102,13 +122,22 @@ public class ChatServer {
         connectedUsers.put(user.getUserId(), user);
         System.out.println("用户 " + user.getUsername() + " 加入聊天室，当前在线用户数：" + connectedUsers.size());
         
-        // 广播用户加入消息
-        ChatMessage joinMessage = new ChatMessage();
-        joinMessage.setType("system");
-        joinMessage.setContent(user.getUsername() + " 加入了聊天室");
-        joinMessage.setTimestamp(System.currentTimeMillis());
-        
-        broadcastMessage(joinMessage);
+        // 使用内存池构建系统消息
+        PooledStringBuilder messageBuilder = poolManager.getStringBuilder();
+        try {
+            String content = messageBuilder.append(user.getUsername())
+                                         .append(" 加入了聊天室")
+                                         .toString();
+            
+            ChatMessage joinMessage = new ChatMessage();
+            joinMessage.setType("system");
+            joinMessage.setContent(content);
+            joinMessage.setTimestamp(System.currentTimeMillis());
+            
+            broadcastMessage(joinMessage);
+        } finally {
+            poolManager.releaseStringBuilder(messageBuilder);
+        }
     }
     
     // 移除用户
@@ -117,13 +146,22 @@ public class ChatServer {
         if (user != null) {
             System.out.println("用户 " + user.getUsername() + " 离开聊天室，当前在线用户数：" + connectedUsers.size());
             
-            // 广播用户离开消息
-            ChatMessage leaveMessage = new ChatMessage();
-            leaveMessage.setType("system");
-            leaveMessage.setContent(user.getUsername() + " 离开了聊天室");
-            leaveMessage.setTimestamp(System.currentTimeMillis());
-            
-            broadcastMessage(leaveMessage);
+            // 使用内存池构建系统消息
+            PooledStringBuilder messageBuilder = poolManager.getStringBuilder();
+            try {
+                String content = messageBuilder.append(user.getUsername())
+                                             .append(" 离开了聊天室")
+                                             .toString();
+                
+                ChatMessage leaveMessage = new ChatMessage();
+                leaveMessage.setType("system");
+                leaveMessage.setContent(content);
+                leaveMessage.setTimestamp(System.currentTimeMillis());
+                
+                broadcastMessage(leaveMessage);
+            } finally {
+                poolManager.releaseStringBuilder(messageBuilder);
+            }
         }
     }
     
@@ -136,9 +174,19 @@ public class ChatServer {
             messageHistory.remove(0);
         }
         
-        System.out.println("广播消息：[" + message.getType() + "] " + 
-                          (message.getUsername() != null ? message.getUsername() + ": " : "") + 
-                          message.getContent());
+        // 使用内存池构建日志消息
+        PooledStringBuilder logBuilder = poolManager.getStringBuilder();
+        try {
+            String logMessage = logBuilder.append("广播消息：[")
+                                        .append(message.getType())
+                                        .append("] ")
+                                        .append(message.getUsername() != null ? message.getUsername() + ": " : "")
+                                        .append(message.getContent())
+                                        .toString();
+            System.out.println(logMessage);
+        } finally {
+            poolManager.releaseStringBuilder(logBuilder);
+        }
     }
     
     // 获取在线用户列表

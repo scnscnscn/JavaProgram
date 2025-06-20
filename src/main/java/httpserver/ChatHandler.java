@@ -3,6 +3,8 @@ package httpserver;
 import httpserver.model.Request;
 import httpserver.model.ChatMessage;
 import httpserver.model.ChatUser;
+import httpserver.pool.PoolManager;
+import httpserver.pool.HttpResponseBuilder;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
 import java.io.IOException;
@@ -14,6 +16,7 @@ import java.util.UUID;
 public class ChatHandler implements Runnable {
     private Socket socket;
     private static final ObjectMapper objectMapper = new ObjectMapper();
+    private final PoolManager poolManager = PoolManager.getInstance();
     
     public ChatHandler(Socket socket) {
         this.socket = socket;
@@ -47,100 +50,149 @@ public class ChatHandler implements Runnable {
     }
     
     private void handleGetRequest(String uri, PrintWriter out) throws IOException {
-        if ("/".equals(uri)) {
-            // 返回聊天室主页面
-            String htmlContent = getChatRoomHtml();
-            sendHtmlResponse(out, htmlContent);
-        } else if ("/api/messages".equals(uri)) {
-            // 返回消息历史
-            try {
-                String messagesJson = objectMapper.writeValueAsString(ChatServer.getMessageHistory());
-                sendJsonResponse(out, messagesJson);
-            } catch (Exception e) {
-                sendErrorResponse(out, 500, "获取消息历史失败");
+        HttpResponseBuilder responseBuilder = poolManager.getHttpResponseBuilder();
+        try {
+            if ("/".equals(uri)) {
+                // 返回聊天室主页面
+                String htmlContent = getChatRoomHtml();
+                String response = responseBuilder.buildHtmlResponse(htmlContent);
+                out.print(response);
+                out.flush();
+            } else if ("/api/messages".equals(uri)) {
+                // 返回消息历史
+                try {
+                    String messagesJson = objectMapper.writeValueAsString(ChatServer.getMessageHistory());
+                    String response = responseBuilder.buildJsonResponse(messagesJson);
+                    out.print(response);
+                    out.flush();
+                } catch (Exception e) {
+                    sendErrorResponse(out, 500, "获取消息历史失败");
+                }
+            } else if ("/api/users".equals(uri)) {
+                // 返回在线用户列表
+                try {
+                    String usersJson = objectMapper.writeValueAsString(ChatServer.getOnlineUsers());
+                    String response = responseBuilder.buildJsonResponse(usersJson);
+                    out.print(response);
+                    out.flush();
+                } catch (Exception e) {
+                    sendErrorResponse(out, 500, "获取用户列表失败");
+                }
+            } else {
+                sendErrorResponse(out, 404, "页面未找到");
             }
-        } else if ("/api/users".equals(uri)) {
-            // 返回在线用户列表
-            try {
-                String usersJson = objectMapper.writeValueAsString(ChatServer.getOnlineUsers());
-                sendJsonResponse(out, usersJson);
-            } catch (Exception e) {
-                sendErrorResponse(out, 500, "获取用户列表失败");
-            }
-        } else {
-            sendErrorResponse(out, 404, "页面未找到");
+        } finally {
+            poolManager.releaseHttpResponseBuilder(responseBuilder);
         }
     }
     
     private void handlePostRequest(String uri, Request request, PrintWriter out) throws IOException {
-        if ("/api/join".equals(uri)) {
-            // 用户加入聊天室
-            try {
-                String username = extractUsernameFromRequest(request.getMessage());
-                if (username == null || username.trim().isEmpty()) {
-                    sendErrorResponse(out, 400, "用户名不能为空");
-                    return;
-                }
-                
-                username = username.trim();
-                
-                // 检查用户名是否已存在
-                if (ChatServer.isUsernameExists(username)) {
-                    sendErrorResponse(out, 409, "用户名已存在，请选择其他用户名");
-                    return;
-                }
-                
-                String userId = UUID.randomUUID().toString();
-                // 注意：这里不再传递socket，因为HTTP是无状态的
-                ChatUser user = new ChatUser(userId, username);
-                ChatServer.addUser(user);
-                
-                String response = "{\"success\": true, \"userId\": \"" + userId + "\"}";
-                sendJsonResponse(out, response);
-                
-            } catch (Exception e) {
-                System.err.println("处理加入请求失败：" + e.getMessage());
-                sendErrorResponse(out, 500, "加入聊天室失败");
+        HttpResponseBuilder responseBuilder = poolManager.getHttpResponseBuilder();
+        try {
+            if ("/api/join".equals(uri)) {
+                // 用户加入聊天室
+                handleJoinRequest(request, out, responseBuilder);
+            } else if ("/api/send".equals(uri)) {
+                // 发送消息
+                handleSendMessage(request, out, responseBuilder);
+            } else if ("/api/leave".equals(uri)) {
+                // 用户离开聊天室
+                handleLeaveRequest(request, out, responseBuilder);
+            } else {
+                String response = responseBuilder.buildErrorResponse(404, "API接口未找到");
+                out.print(response);
+                out.flush();
             }
-        } else if ("/api/send".equals(uri)) {
-            // 发送消息
-            try {
-                ChatMessage message = objectMapper.readValue(request.getMessage(), ChatMessage.class);
-                
-                // 验证用户是否存在
-                if (!ChatServer.isUserExists(message.getUserId())) {
-                    sendErrorResponse(out, 401, "用户不存在或已离线");
-                    return;
-                }
-                
-                message.setTimestamp(System.currentTimeMillis());
-                message.setType("user");
-                
-                ChatServer.broadcastMessage(message);
-                
-                String response = "{\"success\": true}";
-                sendJsonResponse(out, response);
-            } catch (Exception e) {
-                System.err.println("处理发送消息失败：" + e.getMessage());
-                sendErrorResponse(out, 500, "发送消息失败");
+        } finally {
+            poolManager.releaseHttpResponseBuilder(responseBuilder);
+        }
+    }
+    
+    private void handleJoinRequest(Request request, PrintWriter out, HttpResponseBuilder responseBuilder) {
+        try {
+            String username = extractUsernameFromRequest(request.getMessage());
+            if (username == null || username.trim().isEmpty()) {
+                String response = responseBuilder.buildErrorResponse(400, "用户名不能为空");
+                out.print(response);
+                out.flush();
+                return;
             }
-        } else if ("/api/leave".equals(uri)) {
-            // 用户离开聊天室
-            try {
-                String userIdJson = request.getMessage();
-                String userId = extractUserIdFromRequest(userIdJson);
-                if (userId != null) {
-                    ChatServer.removeUser(userId);
-                    String response = "{\"success\": true}";
-                    sendJsonResponse(out, response);
-                } else {
-                    sendErrorResponse(out, 400, "无效的用户ID");
-                }
-            } catch (Exception e) {
-                sendErrorResponse(out, 500, "离开聊天室失败");
+            
+            username = username.trim();
+            
+            // 检查用户名是否已存在
+            if (ChatServer.isUsernameExists(username)) {
+                String response = responseBuilder.buildErrorResponse(409, "用户名已存在，请选择其他用户名");
+                out.print(response);
+                out.flush();
+                return;
             }
-        } else {
-            sendErrorResponse(out, 404, "API接口未找到");
+            
+            String userId = UUID.randomUUID().toString();
+            ChatUser user = new ChatUser(userId, username);
+            ChatServer.addUser(user);
+            
+            String jsonResponse = "{\"success\": true, \"userId\": \"" + userId + "\"}";
+            String response = responseBuilder.buildJsonResponse(jsonResponse);
+            out.print(response);
+            out.flush();
+            
+        } catch (Exception e) {
+            System.err.println("处理加入请求失败：" + e.getMessage());
+            String response = responseBuilder.buildErrorResponse(500, "加入聊天室失败");
+            out.print(response);
+            out.flush();
+        }
+    }
+    
+    private void handleSendMessage(Request request, PrintWriter out, HttpResponseBuilder responseBuilder) {
+        try {
+            ChatMessage message = objectMapper.readValue(request.getMessage(), ChatMessage.class);
+            
+            // 验证用户是否存在
+            if (!ChatServer.isUserExists(message.getUserId())) {
+                String response = responseBuilder.buildErrorResponse(401, "用户不存在或已离线");
+                out.print(response);
+                out.flush();
+                return;
+            }
+            
+            message.setTimestamp(System.currentTimeMillis());
+            message.setType("user");
+            
+            ChatServer.broadcastMessage(message);
+            
+            String jsonResponse = "{\"success\": true}";
+            String response = responseBuilder.buildJsonResponse(jsonResponse);
+            out.print(response);
+            out.flush();
+        } catch (Exception e) {
+            System.err.println("处理发送消息失败：" + e.getMessage());
+            String response = responseBuilder.buildErrorResponse(500, "发送消息失败");
+            out.print(response);
+            out.flush();
+        }
+    }
+    
+    private void handleLeaveRequest(Request request, PrintWriter out, HttpResponseBuilder responseBuilder) {
+        try {
+            String userIdJson = request.getMessage();
+            String userId = extractUserIdFromRequest(userIdJson);
+            if (userId != null) {
+                ChatServer.removeUser(userId);
+                String jsonResponse = "{\"success\": true}";
+                String response = responseBuilder.buildJsonResponse(jsonResponse);
+                out.print(response);
+                out.flush();
+            } else {
+                String response = responseBuilder.buildErrorResponse(400, "无效的用户ID");
+                out.print(response);
+                out.flush();
+            }
+        } catch (Exception e) {
+            String response = responseBuilder.buildErrorResponse(500, "离开聊天室失败");
+            out.print(response);
+            out.flush();
         }
     }
     
@@ -181,33 +233,15 @@ public class ChatHandler implements Runnable {
         return null;
     }
     
-    private void sendHtmlResponse(PrintWriter out, String content) {
-        String response = "HTTP/1.1 200 OK\r\n" +
-                         "Content-Type: text/html; charset=UTF-8\r\n" +
-                         "Content-Length: " + content.getBytes().length + "\r\n" +
-                         "\r\n" + content;
-        out.print(response);
-        out.flush();
-    }
-    
-    private void sendJsonResponse(PrintWriter out, String jsonContent) {
-        String response = "HTTP/1.1 200 OK\r\n" +
-                         "Content-Type: application/json; charset=UTF-8\r\n" +
-                         "Access-Control-Allow-Origin: *\r\n" +
-                         "Content-Length: " + jsonContent.getBytes().length + "\r\n" +
-                         "\r\n" + jsonContent;
-        out.print(response);
-        out.flush();
-    }
-    
     private void sendErrorResponse(PrintWriter out, int statusCode, String message) {
-        String content = "{\"error\": \"" + message + "\"}";
-        String response = "HTTP/1.1 " + statusCode + " Error\r\n" +
-                         "Content-Type: application/json; charset=UTF-8\r\n" +
-                         "Content-Length: " + content.getBytes().length + "\r\n" +
-                         "\r\n" + content;
-        out.print(response);
-        out.flush();
+        HttpResponseBuilder responseBuilder = poolManager.getHttpResponseBuilder();
+        try {
+            String response = responseBuilder.buildErrorResponse(statusCode, message);
+            out.print(response);
+            out.flush();
+        } finally {
+            poolManager.releaseHttpResponseBuilder(responseBuilder);
+        }
     }
     
     private String getChatRoomHtml() {
@@ -216,12 +250,13 @@ public class ChatHandler implements Runnable {
                "<head>\n" +
                "    <meta charset=\"UTF-8\">\n" +
                "    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n" +
-               "    <title>本地聊天室</title>\n" +
+               "    <title>本地聊天室 - 高性能版</title>\n" +
                "    <style>\n" +
                "        * { margin: 0; padding: 0; box-sizing: border-box; }\n" +
                "        body { font-family: 'Microsoft YaHei', Arial, sans-serif; background: #f5f5f5; }\n" +
                "        .container { max-width: 800px; margin: 0 auto; background: white; height: 100vh; display: flex; flex-direction: column; }\n" +
                "        .header { background: #4CAF50; color: white; padding: 15px; text-align: center; position: relative; }\n" +
+               "        .performance-badge { position: absolute; top: 5px; left: 20px; background: rgba(255,255,255,0.2); padding: 2px 8px; border-radius: 12px; font-size: 10px; }\n" +
                "        .chat-area { flex: 1; display: flex; flex-direction: column; overflow: hidden; }\n" +
                "        .messages { flex: 1; padding: 20px; overflow-y: auto; background: #fafafa; }\n" +
                "        .message { margin-bottom: 15px; padding: 10px; border-radius: 8px; max-width: 70%; }\n" +
@@ -246,6 +281,7 @@ public class ChatHandler implements Runnable {
                "<body>\n" +
                "    <div class=\"container\">\n" +
                "        <div class=\"header\">\n" +
+               "            <div class=\"performance-badge\">内存池优化</div>\n" +
                "            <h1>本地聊天室</h1>\n" +
                "            <div class=\"user-count\" id=\"userCount\">在线用户: 0</div>\n" +
                "            <button class=\"users-toggle\" onclick=\"toggleUsers()\">在线用户</button>\n" +
@@ -265,6 +301,7 @@ public class ChatHandler implements Runnable {
                "    <div class=\"login-form\" id=\"loginForm\">\n" +
                "        <div class=\"login-box\">\n" +
                "            <h2>加入聊天室</h2>\n" +
+               "            <p style=\"color: #666; font-size: 12px; margin: 10px 0;\">✨ 采用内存池技术，性能更优</p>\n" +
                "            <br>\n" +
                "            <input type=\"text\" id=\"usernameInput\" placeholder=\"请输入您的昵称\" onkeypress=\"handleLoginKeyPress(event)\" maxlength=\"20\">\n" +
                "            <br><br>\n" +
@@ -427,7 +464,7 @@ public class ChatHandler implements Runnable {
                "                if (message.type === 'user') {\n" +
                "                    const time = new Date(message.timestamp).toLocaleTimeString();\n" +
                "                    messageDiv.innerHTML = `\n" +
-               "                        <div class=\"message-header\">${message.username} - ${time}</div>\n" +
+               "                        <div class=\"message-header\">${escapeHtml(message.username)} - ${time}</div>\n" +
                "                        <div>${escapeHtml(message.content)}</div>\n" +
                "                    `;\n" +
                "                } else {\n" +
